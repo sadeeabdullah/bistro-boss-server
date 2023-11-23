@@ -1,8 +1,10 @@
+require('dotenv').config()
 const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken')
-require('dotenv').config()
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+
 const port = process.env.PORT || 5000;
 
 
@@ -28,7 +30,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
 
 
@@ -36,6 +38,7 @@ async function run() {
     const menuCollection = client.db("bistrodb").collection("menu")
     const reviewsCollection = client.db("bistrodb").collection("reviews")
     const cartsCollection = client.db("bistrodb").collection("carts")
+    const paymentCollection = client.db("bistrodb").collection("payments")
 
     // jwt related api
     app.post( '/jwt', async( req, res ) => {
@@ -198,7 +201,7 @@ async function run() {
 
     app.patch('/menu/:id', async(req,res)=>{
       const id = req.params.id;
-      const item = req.bodyj
+      const item = req.body
       const filter = { _id: id};
       const updatedDoc={
         $set:{
@@ -232,9 +235,89 @@ async function run() {
     })
 
 
+
+
+    // payment intent 
+    app.post('/create-payment-intent',async(req, res) =>{
+      const {price} = req.body;
+      const amount = parseInt(price * 100 )
+      console.log(amount,'amount inside the intent')
+      
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types:['card']
+      });
+      res.send({
+        clientSecret:paymentIntent.client_secret
+      })
+    })
+    app.get('/payments',async(req,res)=>{
+      const result =  await paymentCollection.find().toArray();
+      res.send(result)
+    })
+
+    // payment history 
+    app.get('/payments/:email',verifyToken,async(req,res)=>{
+      const query = {email:req.params.email}
+      if (req.params.email !== req.decoded.email) {
+        res.status(403).send({message :'forbidden access'})
+      }
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result)
+    })
+
+    app.post('/payments',async(req,res)=>{
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+
+      // carefully delete each item from the cart
+      console.log('payment info',payment)
+      const query= {_id:{
+        $in:payment.cartIds.map(id=> new ObjectId(id))
+      }}
+      const deleteResult = await cartsCollection.deleteMany(query)
+      res.send({paymentResult,deleteResult})
+    })
+
+
+    // stats or analytics
+    app.get('/admin-stats',verifyToken,verifyToken, async( req, res ) =>{
+      const users = await userCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      // this is not the best way 
+      // const payments = await paymentCollection.find().toArray();
+      // console.log('payment is here',payments)
+      // const revenue = payments.reduce((total,payment)=>total+payment.price,0)
+
+
+      // the best way is here
+
+      const result = await paymentCollection.aggregate([
+        {
+          $group:{
+            _id:null,
+            totalRevenue:{
+              $sum:'$price'
+            }
+          }
+        },
+      ]).toArray();
+      const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+      res.send({
+        users,
+        menuItems,
+        orders,
+        revenue
+      })
+    })
+
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
